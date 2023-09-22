@@ -1,28 +1,73 @@
 
+#include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
-#include <sys/types.h>
-#include <sys/wait.h>
+#include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
-int main(void) {
-  pid_t pid = fork();
-  if (pid == -1) {
-    return errno;
+int fd = -1;
+
+void handle_signal(int signum) {
+  printf("Closing file and exiting (signal %d)...\n", signum);
+
+  if (fd == -1) {
+    printf("No open file\n");
+    exit(0);
   }
-  if (pid == 0) {
-    sleep(2);
+
+  int ret = close(fd);
+  if (ret == -1) {
+    int err = errno;
+    perror("close");
+    exit(err);
   }
-  else {
-    printf("Calling wait\n");
-    int wstatus;
-    pid_t wait_pid = wait(&wstatus);
-    if (WIFEXITED(wstatus)) {
-      printf("Wait returned for an exited process! pid: %d, status: %d\n", wait_pid, WEXITSTATUS(wstatus));
+  printf("Closed file\n");
+
+  sleep(10);
+
+  exit(0);
+}
+
+void register_signal(int signum)
+{
+  struct sigaction new_action = {0};
+  sigemptyset(&new_action.sa_mask);
+  new_action.sa_handler = handle_signal;
+  if (sigaction(signum, &new_action, NULL) == -1) {
+    int err = errno;
+    perror("sigaction");
+    exit(err);
+  }
+}
+
+int main(int argc, char *argv[])
+{
+  if (argc > 2) {
+    return EINVAL;
+  }
+
+  printf("I am pid: %d\n", getpid());
+
+  if (argc == 2) {
+    fd = open(argv[1], O_RDONLY);
+    if (fd == -1) {
+      int err = errno;
+      perror("open");
+      return err;
     }
-    else {
-      return ECHILD;
-    }
+    printf("Opened fd: %d\n", fd);
   }
+
+  register_signal(SIGINT);
+  register_signal(SIGTERM);
+
+  while (true) {
+    sleep(9999);
+  }
+
   return 0;
 }
