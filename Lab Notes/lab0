@@ -8,5 +8,6 @@ ip -br -4 addr
 
 Then, to 'remote development' to the debian machine, you can do:
 
-ssh 192.168.64.6
+MAC: ssh 192.168.64.6
 
+Home PC: ssh 172.23.80.208

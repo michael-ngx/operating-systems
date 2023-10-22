@@ -1,74 +1,94 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <sys/wait.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
-static void check_error(int ret, const char *message) {
-    if (ret != -1) {
-        return;
+#define PAGE_SIZE 4096
+
+#define LEVELS 3
+#define PTE_VALID (1 << 0)
+
+static uint64_t* root_page_table = NULL;
+
+static uint64_t* allocate_page_table() {
+    void* page = mmap(NULL, PAGE_SIZE, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
+    if (page == MAP_FAILED) {
+        int err = errno;
+        perror("mmap");
+        exit(err);
     }
-    int err = errno;
-    perror(message);
-    exit(err);
+    return page;
 }
 
-static void parent(int in_pipefd[2], int out_pipefd[2], pid_t child_pid) {
-    close(in_pipefd[0]);
-    close(out_pipefd[1]);
-    
-    const char* message = "Testing\n";
-    ssize_t bytes_written = write(in_pipefd[1], message, strlen(message));
-    check_error(bytes_written, "write");
-    close(in_pipefd[1]);
-    
-    int wstatus;
-    check_error(wait(&wstatus), "wait");
-    assert(WIFEXITED(wstatus));
-    assert(WEXITSTATUS(wstatus) == 0);
-    
-    char buffer[4096];
-    ssize_t bytes_read = read(out_pipefd[0], buffer, sizeof(buffer));    // Recall: read is blocking
-    check_error(bytes_read, "read");
-    printf("Got: %s\n", buffer);
-    close(out_pipefd[0]);
+static void deallocate_page_table(void* page) {
+    if (munmap(page, PAGE_SIZE) == -1) {
+        int err = errno;
+        perror("munmap");
+        exit(err);
+    }
 }
 
-static void child(int in_pipefd[2], int out_pipefd[2], const char *program) {
-    ////////////////////////////////////
-    dup2(in_pipefd[0], 0);
-    dup2(out_pipefd[1], 1); 
-    ////////////////////////////////////
-    
-    close(in_pipefd[0]);
-    close(in_pipefd[1]);
-    close(out_pipefd[0]);
-    close(out_pipefd[1]);   // Closed out_pipefd[1], but didn't close fd = 1 (which is also referring to the write end of the pipe by now)
-    
-    execlp(program, program, NULL);
+static uint64_t mmu(uint64_t virtual_address) {
+    uint64_t* page_table = root_page_table;
+    uint64_t va = (uint64_t) virtual_address;
+    for (int i = LEVELS - 1; i >= 0; --i) {
+        uint8_t start_bit = 9 * i + 12;
+        uint64_t mask = (uint64_t) 0x1FF << start_bit;
+        uint16_t index = (mask & va) >> start_bit;
+
+        uint64_t pte = page_table[index];
+        if (!(pte & PTE_VALID)) {
+            printf("0x%lX: page fault\n", va);
+            return 0;
+        }
+
+        if (i != 0) {
+            page_table = (uint64_t*) ((pte >> 10) << 12);
+            continue;
+        }
+
+        uint64_t pa = ((pte & ~0x3FF) << 2) | (va & 0xFFF);
+        printf("0x%lX: 0x%lX\n", va, pa);
+        return pa;
+    }
+    __builtin_unreachable();
 }
 
-int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        return EINVAL;
-    }
 
-    int in_pipefd[2] = {0};
-    check_error(pipe(in_pipefd), "pipe");
+uint64_t pte_from_ppn(uint64_t ppn) {
+    uint64_t pte = ppn << 10;
+    pte |= PTE_VALID;
+    return pte;
+}
 
-    int out_pipefd[2] = {0};
-    check_error(pipe(out_pipefd), "pipe");
+uint64_t pte_from_page_table(uint64_t* page_table) {
+    return pte_from_ppn(((uint64_t) page_table) >> 12);
+}
 
-    pid_t pid = fork();
-    if (pid > 0) {
-        parent(in_pipefd, out_pipefd, pid);
-    }
-    else {
-        child(in_pipefd, out_pipefd, argv[1]);
-    }
+int main() {
+    assert(sysconf(_SC_PAGE_SIZE) == PAGE_SIZE);
+
+    uint64_t* l2_page_table_1 = allocate_page_table();
+
+    root_page_table = l2_page_table_1;
+
+    uint64_t* l1_page_table_1 = allocate_page_table();
+    l2_page_table_1[0] = pte_from_page_table(l1_page_table_1);
+
+    uint64_t* l0_page_table_1 = allocate_page_table();
+    l1_page_table_1[5] = pte_from_page_table(l0_page_table_1);
+
+    l0_page_table_1[188] = pte_from_ppn(0xCAFE);
+
+    mmu(0xABCDEF);
+    mmu(0x1ABCDEF);
+
+    deallocate_page_table(root_page_table);
+    root_page_table = NULL;
 
     return 0;
 }
